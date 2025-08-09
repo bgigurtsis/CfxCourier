@@ -4,3 +4,6 @@ artifact
 pyEscrow/profile/*
 state.json
 old-scripts
+.env
+.env.dev
+aws-lambda

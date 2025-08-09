@@ -1,0 +1,10 @@
+{
+  "Records": [
+    {
+      "s3": {
+        "bucket": { "name": "cfx-ingress-bucket" },
+        "object": { "key": "unprocessed/test.zip" }
+      }
+    }
+  ]
+}

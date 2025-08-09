@@ -1,3 +1,5 @@
 node_modules
 playwright-trace.zip
-./node_modules
+artifact    
+pyEscrow/profile/*
+state.json

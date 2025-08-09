@@ -1,10 +1,9 @@
 name: Upload to CFX Keymaster (Node)
-
 on:
   workflow_dispatch:
     inputs:
       asset_name:
-        description: "Asset name (make it unique: e.g. my-asset-${{ github.run_number }})"
+        description: "Asset name (make it unique, e.g. my-asset-123)"
         required: true
       zip_path:
         description: "Path to the built zip (repo-relative)"
@@ -17,30 +16,24 @@ on:
         description: "Minutes to wait for ACTIVE"
         required: false
         default: "20"
-
 jobs:
   upload:
     runs-on: ubuntu-latest
     timeout-minutes: 35
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-
       - name: Install deps & browsers
         run: |
           npm ci || npm i
           npx playwright install --with-deps
-
       - name: Ensure output dir
         run: |
           mkdir -p "$(dirname '${{ github.event.inputs.output_path }}')"
-
       - name: Sign in + Upload + Download
         env:
           CFX_USERNAME: ${{ secrets.CFX_USERNAME }}
@@ -51,13 +44,11 @@ jobs:
             --zip-path "${{ github.event.inputs.zip_path }}" \
             --output "${{ github.event.inputs.output_path }}" \
             --timeout-mins "${{ github.event.inputs.timeout_mins }}"
-
       - name: "Artifact: escrowed zip"
         uses: actions/upload-artifact@v4
         with:
           name: escrowed-asset
           path: ${{ github.event.inputs.output_path }}
-
       - name: "Artifact: debugging (on failure)"
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4

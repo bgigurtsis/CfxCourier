@@ -1,23 +1,27 @@
-name: Upload to CFX Keymaster
+name: Upload to CFX Keymaster (Node)
 
 on:
   workflow_dispatch:
     inputs:
       asset_name:
-        description: "Name to give the asset (avoid collisions)"
+        description: "Asset name (make it unique: e.g. my-asset-${{ github.run_number }})"
         required: true
       zip_path:
-        description: "Path to the zip produced by your build (repo-relative)"
+        description: "Path to the built zip (repo-relative)"
         required: true
       output_path:
-        description: "Where to save the escrowed zip (repo-relative)"
+        description: "Where to save the escrowed zip"
         required: false
         default: "artifact/escrowed.zip"
+      timeout_mins:
+        description: "Minutes to wait for ACTIVE"
+        required: false
+        default: "20"
 
 jobs:
   upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -28,7 +32,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install dependencies & browsers
+      - name: Install deps & browsers
         run: |
           npm ci || npm i
           npx playwright install --with-deps
@@ -36,7 +40,7 @@ jobs:
       - name: Ensure output dir
         run: mkdir -p "$(dirname '${{ github.event.inputs.output_path }}')"
 
-      - name: Upload to Keymaster
+      - name: Sign in + Upload + Download
         env:
           CFX_USERNAME: ${{ secrets.CFX_USERNAME }}
           CFX_PASSWORD: ${{ secrets.CFX_PASSWORD }}
@@ -45,17 +49,19 @@ jobs:
             --asset-name "${{ github.event.inputs.asset_name }}" \
             --zip-path "${{ github.event.inputs.zip_path }}" \
             --output "${{ github.event.inputs.output_path }}" \
-            --timeout-mins 15
+            --timeout-mins ${{ github.event.inputs.timeout_mins }}
 
-      - name: Upload escrowed zip (artifact)
+      - name: Artifact: escrowed zip
         uses: actions/upload-artifact@v4
         with:
           name: escrowed-asset
           path: ${{ github.event.inputs.output_path }}
 
-      - name: Upload Playwright trace if failed
+      - name: Artifact: debugging (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-trace
-          path: playwright-trace.zip
+          name: playwright-debug
+          path: |
+            playwright-trace.zip
+            scripts/failure.png

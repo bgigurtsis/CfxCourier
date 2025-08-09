@@ -1,16 +1,26 @@
-// Run with: node scripts/keymaster-upload.js --asset-name "My Asset" --zip-path "build/my.zip" --output "artifact/escrowed.zip"
-// Env: CFX_USERNAME, CFX_PASSWORD
+// Usage:
+//   node scripts/keymaster-upload.js \
+//     --asset-name "My Asset v1.2.3" \
+//     --zip-path "build/my.zip" \
+//     --output "artifact/escrowed.zip" \
+//     --timeout-mins 20
+//
+// Requires GitHub Secrets: CFX_USERNAME, CFX_PASSWORD
 import { chromium } from "playwright";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { hideBin } from "yargs/helpers";
 import yargs from "yargs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const argv = yargs(hideBin(process.argv))
   .option("asset-name", { type: "string", demandOption: true })
   .option("zip-path", { type: "string", demandOption: true })
   .option("output", { type: "string", default: "artifact/escrowed.zip" })
-  .option("timeout-mins", { type: "number", default: 15, describe: "Max minutes to wait for ACTIVE" })
+  .option("timeout-mins", { type: "number", default: 15 })
   .option("headless", { type: "boolean", default: true })
   .parse();
 
@@ -22,15 +32,118 @@ if (!USER || !PASS) {
   process.exit(1);
 }
 if (!fs.existsSync(argv["zip-path"])) {
-  console.error(`Zip not found at ${argv["zip-path"]}`);
+  console.error(`Zip not found: ${argv["zip-path"]}`);
   process.exit(1);
 }
 fs.mkdirSync(path.dirname(argv.output), { recursive: true });
 
 const BASE = "https://portal.cfx.re";
-const CREATED_ASSETS_URL = `${BASE}/assets/created-assets`;
+const LOGIN_URL = `${BASE}/login`;
+const CREATE_URL = `${BASE}/assets/created-assets?modal=create`;
+const LIST_URL = `${BASE}/assets/created-assets?page=1&sort=asset.id&direction=desc`;
 
-function now() { return new Date().toISOString(); }
+const now = () => new Date().toISOString();
+
+async function signIn(page) {
+  // Go to login and click the exact button you pasted
+  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
+  const signInBtn = page.getByRole("button", { name: /^sign in with cfx\.re$/i });
+  await signInBtn.waitFor({ timeout: 60_000 });
+  await Promise.all([
+    page.waitForLoadState("domcontentloaded"),
+    signInBtn.click()
+  ]);
+
+  // Fill username/password on the identity page
+  const userField = page.locator('input[type="email"], input[name="email"], input[name="username"], input[autocomplete="username"], input[name="login"]');
+  const passField = page.locator('input[type="password"], input[name="password"], input[autocomplete="current-password"]');
+  await userField.first().waitFor({ timeout: 60_000 });
+  await userField.first().fill(USER);
+  await passField.first().fill(PASS);
+
+  const submit = page.getByRole("button", { name: /sign in|log in|continue|authorize|next/i });
+  if (await submit.count()) {
+    await Promise.all([
+      page.waitForLoadState("domcontentloaded"),
+      submit.first().click()
+    ]);
+  } else {
+    await page.keyboard.press("Enter");
+    await page.waitForLoadState("domcontentloaded");
+  }
+}
+
+async function openCreateModal(page) {
+  // Directly open the create modal URL you provided
+  await page.goto(CREATE_URL, { waitUntil: "domcontentloaded" });
+
+  // Wait for the dropzone/input and the asset name input
+  const dialog = page.locator('div[role="dialog"]');
+  await dialog.waitFor({ timeout: 30_000 }).catch(() => {}); // some builds render inline, not always with role=dialog
+
+  // Asset name input (exact placeholder you sent)
+  const nameInput = page.locator('input[placeholder="Enter asset name"]');
+  await nameInput.first().waitFor({ timeout: 30_000 });
+  return { nameInput, dialog };
+}
+
+async function uploadAsset(page, name, zipPath, dialog) {
+  // Fill asset name
+  const nameInput = page.locator('input[placeholder="Enter asset name"]');
+  await nameInput.first().fill(name);
+
+  // Use the hidden <input type="file"> inside the dropzone you pasted
+  const scopedRoot = dialog.count() ? dialog : page;
+  const fileInput = scopedRoot.locator('input[type="file"]');
+  await fileInput.first().setInputFiles(zipPath, { timeout: 60_000 });
+
+  // Click the submit-ish button. It varies; accept any of these labels.
+  const createOrUpload = scopedRoot.getByRole("button", { name: /upload file|upload|create|submit|save/i });
+  if (await createOrUpload.count()) {
+    await Promise.all([
+      page.waitForLoadState("networkidle"),
+      createOrUpload.first().click()
+    ]);
+  } else {
+    // Some UIs auto start once a file is selected
+    await page.waitForLoadState("networkidle");
+  }
+}
+
+async function waitForActive(page, name, timeoutMins) {
+  // Go to the list view you pasted and poll until the row shows ACTIVE
+  await page.goto(LIST_URL, { waitUntil: "domcontentloaded" });
+
+  const deadline = Date.now() + timeoutMins * 60_000;
+  const rowForAsset = () => page.locator("tr").filter({ hasText: name }).first();
+
+  // Wait for the row to appear
+  await rowForAsset().waitFor({ timeout: 120_000 });
+
+  while (Date.now() < deadline) {
+    const row = rowForAsset();
+    const text = ((await row.textContent()) || "").toUpperCase();
+
+    if (text.includes("ACTIVE")) return row; // done
+    if (text.includes("FAILED")) throw new Error(`Processing FAILED for asset "${name}"`);
+
+    // Refresh so status updates
+    await page.waitForTimeout(5000);
+    await page.reload({ waitUntil: "domcontentloaded" });
+  }
+  throw new Error(`Timed out waiting for ACTIVE status for "${name}"`);
+}
+
+async function downloadEscrow(page, row, outPath) {
+  const dlButton = row.getByRole("button", { name: /^download$/i });
+  await dlButton.first().waitFor({ timeout: 60_000 });
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download", { timeout: 5 * 60_000 }),
+    dlButton.first().click()
+  ]);
+  await download.saveAs(outPath);
+}
 
 (async () => {
   const browser = await chromium.launch({ headless: argv.headless });
@@ -39,110 +152,30 @@ function now() { return new Date().toISOString(); }
   const page = await context.newPage();
 
   try {
-    console.log(`[${now()}] Navigating to created assets…`);
-    await page.goto(CREATED_ASSETS_URL, { waitUntil: "domcontentloaded" });
+    console.log(`[${now()}] Signing in…`);
+    await signIn(page);
 
-    // If we’re not logged in, we should see a login page or a redirect chain.
-    const loggedIn = await page.getByRole("button", { name: /add asset/i }).count().then(c => c > 0);
-    if (!loggedIn) {
-      console.log(`[${now()}] Logging in…`);
-      // Try common username/password fields
-      const userInput = page.locator('input[type="email"], input[name="email"], input[name="username"], input[name="login"]');
-      const passInput = page.locator('input[type="password"], input[name="password"]');
+    console.log(`[${now()}] Opening create modal…`);
+    const { dialog } = await openCreateModal(page);
 
-      await userInput.first().waitFor({ timeout: 60000 });
-      await userInput.first().fill(USER, { timeout: 30000 });
-      await passInput.first().fill(PASS, { timeout: 30000 });
+    console.log(`[${now()}] Uploading zip…`);
+    await uploadAsset(page, argv["asset-name"], path.resolve(argv["zip-path"]), dialog);
 
-      // Click the most likely submit control
-      const submit = page.getByRole("button", { name: /sign in|log in|continue|authorize/i });
-      if (await submit.count() > 0) {
-        await Promise.all([
-          page.waitForLoadState("domcontentloaded"),
-          submit.first().click()
-        ]);
-      } else {
-        // fallback to Enter key
-        await Promise.all([
-          page.waitForLoadState("domcontentloaded"),
-          page.keyboard.press("Enter")
-        ]);
-      }
+    console.log(`[${now()}] Waiting for ACTIVE (timeout ${argv["timeout-mins"]}m)…`);
+    const row = await waitForActive(page, argv["asset-name"], argv["timeout-mins"]);
 
-      // Ensure we land in the portal and on the created-assets page
-      await page.waitForLoadState("domcontentloaded");
-      if (!page.url().includes("/assets/created-assets")) {
-        await page.goto(CREATED_ASSETS_URL, { waitUntil: "domcontentloaded" });
-      }
-      await page.getByRole("button", { name: /add asset/i }).waitFor({ timeout: 60000 });
-    }
+    console.log(`[${now()}] Downloading escrowed zip…`);
+    const outPath = path.resolve(argv.output);
+    await downloadEscrow(page, row, outPath);
 
-    // Start creating/uploading asset
-    console.log(`[${now()}] Opening "Add Asset" dialog…`);
-    await page.getByRole("button", { name: /add asset/i }).click();
-
-    const dialog = page.locator('div[role="dialog"]');
-    await dialog.waitFor({ timeout: 30000 });
-
-    // Fill asset name
-    const assetName = argv["asset-name"];
-    const nameField = dialog.getByLabel(/asset name/i).or(dialog.locator('input[placeholder*="name" i]')).or(dialog.locator('input'));
-    await nameField.first().fill(assetName);
-
-    // Choose file (hidden input is OK with setInputFiles)
-    const fileInput = dialog.locator('input[type="file"]');
-    await fileInput.setInputFiles(argv["zip-path"], { timeout: 60000 });
-
-    // Click "Upload File" (or equivalent)
-    const uploadBtn = dialog.getByRole("button", { name: /upload file|create|submit/i });
-    if (await uploadBtn.count() > 0) {
-      await Promise.all([
-        page.waitForLoadState("networkidle"),
-        uploadBtn.first().click()
-      ]);
-    } else {
-      // Some UIs auto-start after file select; just wait a beat
-      await page.waitForLoadState("networkidle");
-    }
-
-    // Wait for row to appear and become ACTIVE
-    console.log(`[${now()}] Waiting for asset to become ACTIVE (timeout ${argv["timeout-mins"]}m)…`);
-    const deadline = Date.now() + argv["timeout-mins"] * 60_000;
-
-    // helper: get row text and status
-    const rowForAsset = () => page.locator("tr").filter({ hasText: assetName }).first();
-
-    // Wait for row to appear
-    await rowForAsset().waitFor({ timeout: 120000 });
-
-    let active = false;
-    while (Date.now() < deadline) {
-      const row = rowForAsset();
-      const text = (await row.textContent()) || "";
-      if (/\bACTIVE\b/i.test(text)) {
-        active = true;
-        break;
-      }
-      // The table can stale; reload page to refresh status
-      await page.waitForTimeout(5000);
-      await page.reload({ waitUntil: "domcontentloaded" });
-    }
-    if (!active) throw new Error(`Timed out waiting for ACTIVE status for "${assetName}"`);
-
-    console.log(`[${now()}] ACTIVE. Downloading escrowed zip…`);
-    const row = rowForAsset();
-
-    const [download] = await Promise.all([
-      page.waitForEvent("download", { timeout: 5 * 60_000 }),
-      row.getByRole("button", { name: /download/i }).click()
-    ]);
-
-    const savePath = path.resolve(argv.output);
-    await download.saveAs(savePath);
-    console.log(`[${now()}] Saved: ${savePath}`);
-  } catch (err) {
-    console.error(`❌ ERROR: ${err?.message || err}`);
-    throw err;
+    console.log(`[${now()}] Saved: ${outPath}`);
+  } catch (e) {
+    console.error(`[${now()}] ❌ ERROR: ${e?.message || e}`);
+    // Quick screenshot too, alongside trace
+    try {
+      await page.screenshot({ path: path.join(__dirname, "failure.png"), fullPage: true });
+    } catch {}
+    throw e;
   } finally {
     await context.tracing.stop({ path: "playwright-trace.zip" });
     await context.close();

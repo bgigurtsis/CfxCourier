@@ -1,0 +1,12 @@
+{
+  "name": "keymaster-ci",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "upload": "node scripts/keymaster-upload.js"
+  },
+  "dependencies": {
+    "playwright": "^1.45.3",
+    "yargs": "^17.7.2"
+  }
+}

@@ -1,0 +1,61 @@
+name: Upload to CFX Keymaster
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_name:
+        description: "Name to give the asset (avoid collisions)"
+        required: true
+      zip_path:
+        description: "Path to the zip produced by your build (repo-relative)"
+        required: true
+      output_path:
+        description: "Where to save the escrowed zip (repo-relative)"
+        required: false
+        default: "artifact/escrowed.zip"
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies & browsers
+        run: |
+          npm ci || npm i
+          npx playwright install --with-deps
+
+      - name: Ensure output dir
+        run: mkdir -p "$(dirname '${{ github.event.inputs.output_path }}')"
+
+      - name: Upload to Keymaster
+        env:
+          CFX_USERNAME: ${{ secrets.CFX_USERNAME }}
+          CFX_PASSWORD: ${{ secrets.CFX_PASSWORD }}
+        run: |
+          node scripts/keymaster-upload.js \
+            --asset-name "${{ github.event.inputs.asset_name }}" \
+            --zip-path "${{ github.event.inputs.zip_path }}" \
+            --output "${{ github.event.inputs.output_path }}" \
+            --timeout-mins 15
+
+      - name: Upload escrowed zip (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: escrowed-asset
+          path: ${{ github.event.inputs.output_path }}
+
+      - name: Upload Playwright trace if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-trace
+          path: playwright-trace.zip

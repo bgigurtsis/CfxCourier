@@ -8,3 +8,7 @@ old-scripts
 .env.dev
 aws-lambda
 test.py
+pyEscrow
+build
+aws-lambdaartifact
+.github

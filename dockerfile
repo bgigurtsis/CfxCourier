@@ -1,7 +1,5 @@
-# Dockerfile
 FROM mcr.microsoft.com/playwright/python:v1.54.0-jammy
 
-# Put baked caches under /opt so non-root runtime can read them
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -9,23 +7,35 @@ ENV PIP_NO_CACHE_DIR=1 \
     HOME=/tmp \
     PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 
-# System deps are already in base image. Install Python deps:
+# Install Python dependencies
 RUN pip install --upgrade pip && \
     pip install \
-      awslambdaric \
       boto3 \
       requests \
       playwright==1.54.0 \
       camoufox[geoip]==0.4.11 \
       browserforge>=1.2.3 \
-      apify-fingerprint-datapoints
+      apify-fingerprint-datapoints \
+      fastapi \
+      uvicorn[standard] \
+      pytest \
+      pytest-asyncio \
+      moto[s3,sqs] \
+      httpx
 
-# PREBAKE model/data files so nothing tries to write at runtime
+# Prebake data (so runtime is read-only friendly)
 RUN python -m browserforge update && \
     python -m camoufox fetch
 
 WORKDIR /var/task
+
+# Copy the application code
 COPY app.py /var/task/app.py
 
-ENTRYPOINT [ "python", "-m", "awslambdaric" ]
-CMD [ "app.handler" ]
+# Create a simple entrypoint script inline
+RUN echo '#!/bin/bash\nexec python app.py' > /var/task/entrypoint.sh && \
+    chmod +x /var/task/entrypoint.sh
+
+EXPOSE 8080
+
+ENTRYPOINT ["python", "app.py"]

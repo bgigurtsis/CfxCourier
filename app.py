@@ -1,9 +1,8 @@
-import os, sys, json, time, random, urllib.parse, uuid, asyncio, traceback, pathlib
+import os, sys, json, time, random, urllib.parse, uuid, asyncio, traceback, pathlib, boto3, requests
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-
-import boto3
 from playwright.async_api import Page, expect
 from camoufox.async_api import AsyncCamoufox
 from camoufox import DefaultAddons
@@ -113,6 +112,34 @@ async def s3_upload(src_path: Path, bucket: str, key: str):
 # =========================
 # Helpers
 # =========================
+
+async def generate_presigned_url(bucket: str, key: str, expiration=3600):
+    """Generates a presigned URL for an S3 object."""
+    log("INFO", "s3.generate_presigned_url:start", bucket=bucket, key=key)
+    try:
+        url = await asyncio.to_thread(
+            s3.generate_presigned_url,
+            'get_object',
+            Params={'Bucket': bucket, 'Key': key},
+            ExpiresIn=expiration
+        )
+        log("INFO", "s3.generate_presigned_url:end", bucket=bucket, key=key)
+        return url
+    except Exception as e:
+        log("ERROR", "s3.generate_presigned_url:error", error=str(e))
+        return None
+
+async def send_discord_notification(webhook_url: str, message: str):
+    """Sends a message to a Discord webhook."""
+    log("INFO", "discord.notification:start")
+    try:
+        # Running synchronously for simplicity, can be run in a thread
+        response = requests.post(webhook_url, json={"content": message})
+        response.raise_for_status() # Raise an exception for bad status codes
+        log("INFO", "discord.notification:end", status=response.status_code)
+    except Exception as e:
+        log("ERROR", "discord.notification:error", error=str(e))
+
 async def human_delay(min_seconds=1.2, max_seconds=2.6):
     await asyncio.sleep(random.uniform(min_seconds, max_seconds))
 
@@ -359,7 +386,31 @@ async def _process_record(rec, debug_bucket_fallback: Optional[str]):
 
         async with Timer("s3.upload_result", key=out_key, bucket=out_bucket):
             await s3_upload(out_path, out_bucket, out_key)
+        
+        log("INFO", "discord_section_start", checkpoint="after_upload")
+        
+        # 1. Generate the presigned URL for the uploaded file
+        presigned_url = await generate_presigned_url(out_bucket, out_key)
 
+        # 2. Get webhook from environment and send notification
+        webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
+        log("INFO", "discord_check", 
+            has_webhook=bool(webhook_url),
+            has_presigned_url=bool(presigned_url),
+            webhook_exists=webhook_url is not None,
+            presigned_exists=presigned_url is not None)
+            
+        if presigned_url and webhook_url:
+            message = f"✅ Asset processing complete for `{rel}`!\n\nDownload here: {presigned_url}"
+            await send_discord_notification(webhook_url, message)
+        else:
+            # This log will make the problem obvious next time!
+            log("WARNING", "discord.notification:skip", 
+                reason="Webhook URL not set or presigned URL failed",
+                webhook_exists=bool(webhook_url),
+                presigned_url_exists=bool(presigned_url))
+
+        log("INFO", "discord_section_end", checkpoint="before_done")
         log("INFO", "done:record", output=f"s3://{out_bucket}/{out_key}")
         return {"in": f"s3://{bucket}/{key}", "out": f"s3://{out_bucket}/{out_key}"}
 

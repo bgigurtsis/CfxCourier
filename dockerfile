@@ -9,27 +9,18 @@ ENV PIP_NO_CACHE_DIR=1 \
     HOME=/tmp \
     PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 
-# Create a writable directory for browserforge/camoufox data and set permissions
-# This is the key change to fix the read-only filesystem error
-RUN mkdir -p /opt/cfx-cache && \
-    chown -R 165427:165427 /opt/cfx-cache
-
-# Tell browserforge and camoufox to use this new directory
-ENV BROWSERFORGE_HOME=/opt/cfx-cache \
-    CAMOUFOX_HOME=/opt/cfx-cache
-
-# Install Python deps
+# System deps are already in base image. Install Python deps:
 RUN pip install --upgrade pip && \
     pip install \
       awslambdaric \
       boto3 \
+      requests \
       playwright==1.54.0 \
       camoufox[geoip]==0.4.11 \
       browserforge>=1.2.3 \
       apify-fingerprint-datapoints
 
-# PREBAKE model/data files into the writable directory
-# Now these commands should succeed in the Lambda build environment
+# PREBAKE model/data files so nothing tries to write at runtime
 RUN python -m browserforge update && \
     python -m camoufox fetch
 
